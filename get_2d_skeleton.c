@@ -3,9 +3,10 @@
 #include <k4arecord/playback.h>
 #include <k4a/k4a.h>
 #include <k4abt.h>
+#include <sys/time.h>
 #include "matrix.h"
 
-float intrinsic[3][3] = {{613.168701, 0, 639.633728},{0, 612.880493, 364.357513},{0, 0, 1}};
+float intrinsic[3][3] = {{613.168701 * 1.50000, 0, 639.633728 * 1.50000},{0, 612.880493 * 1.50000, 364.357513 * 1.50000},{0, 0, 1}};
 Mat *intrinsic_mat;
 float point_arr[4][1];
 Mat *point_mat;
@@ -22,6 +23,16 @@ float rt_arr[4][4] = {{0.999945, 0.010509, 0.000076, -32.102242},{-0.010469,  0.
 Mat *rt_mat;
 
 Mat *result_mat;
+
+float distortion_factor;
+float x_dist;
+float y_dist;
+float r_u;
+
+float frame;
+struct timeval tv;
+double begin;
+double running;
 
 void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
   k4a_calibration_t sensor_calibration;
@@ -40,11 +51,15 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
   k4a_stream_result_t result = K4A_STREAM_RESULT_SUCCEEDED;
   k4abt_tracker_configuration_t tracker_config = { K4ABT_SENSOR_ORIENTATION_DEFAULT };
   tracker_config.processing_mode = K4ABT_TRACKER_PROCESSING_MODE_GPU;
+  tracker_config.sensor_orientation = K4ABT_SENSOR_ORIENTATION_FLIP180;
   k4abt_tracker_create(&sensor_calibration, tracker_config, &tracker);
   k4abt_tracker_set_temporal_smoothing(tracker, 1);
 
   int depth_width = sensor_calibration.depth_camera_calibration.resolution_width;
   int depth_height = sensor_calibration.depth_camera_calibration.resolution_height;
+
+  gettimeofday(&tv, NULL);
+  begin = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
 
   while (result == K4A_STREAM_RESULT_SUCCEEDED) {
     result = k4a_playback_get_next_capture(playback_handle, &capture);
@@ -65,20 +80,19 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
       if(pop_frame_result == K4A_WAIT_RESULT_SUCCEEDED) {
         k4abt_skeleton_t skeleton;
         size_t num_bodies = k4abt_frame_get_num_bodies(body_frame);
-        printf("%zu bodies detected from device source\n", num_bodies);
+        printf("%zu bodies detected from file source\n", num_bodies);
         for(int i = 0; i < num_bodies; i++) {
           k4abt_frame_get_body_skeleton(body_frame, i, &skeleton);
           k4a_float2_t image_xy;
           int valid;
-          for(int j = 0; j < 32; j++) {
+          for(int j = 0; j < 2; j++) {
             // by sdk
             k4abt_joint_t joint = skeleton.joints[j];
-            sensor_calibration.color_camera_calibration.intrinsics.parameters.param.k1 = 100;
             k4a_calibration_3d_to_2d (&sensor_calibration, &joint.position, K4A_CALIBRATION_TYPE_DEPTH, K4A_CALIBRATION_TYPE_COLOR, &image_xy, &valid);
-            printf("%dth 2d joint point by sdk X :: %f, Y :: %f confidence :: %d\n", j, image_xy.xy.x, image_xy.xy.y, joint.confidence_level);
+            printf("%dth body frame get %dth 2d joint point by sdk X :: %f, Y :: %f confidence :: %d\n",i, j, image_xy.xy.x, image_xy.xy.y, joint.confidence_level);
 
-            // by self
             /*
+            // by self
             k4abt_joint_t joint = skeleton.joints[j];
             point_arr[0][0] = joint.position.xyz.x;
             point_arr[1][0] = joint.position.xyz.y;
@@ -86,12 +100,34 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
             point_arr[3][0] = 1.0;
             mat_init(point_mat, (float *)point_arr);
 
-            mat_mul(result_mat, point_mat, image_mat);
+            // projection to normal plane
+            mat_mul(pr_mat, point_mat, image_mat);
             mat_devide(image_mat, image_mat->mat_array[2][0]);
+
+            // distortion
+            float x = image_mat->mat_array[0][0];
+            float y = image_mat->mat_array[1][0];
+            r_u = x*x + y*y;
+            */
+            /*
+            distortion_factor = 1 + 0.11876499652862549*r_u - 0.09627900272607803*r_u*r_u + 0.06469999998807907*r_u*r_u*r_u;
+            x_dist = -2*0.007321999873965979*x*y + 0.00394099997356534*(r_u + 2*x*x);
+            y_dist = -0.007321999873965979*(r_u + 2*y*y) + 2*0.00394099997356534*x*y;
+            */
+            /*
+            distortion_factor = 1 + 0.679793*r_u -2.550945*r_u*r_u + 1.335280*r_u*r_u*r_u;
+            float dist_factor_s = 1 + 0.557635*r_u -2.393024*r_u*r_u + 1.278366*r_u*r_u*r_u;
+            distortion_factor = distortion_factor/dist_factor_s;
+            x_dist = 2*0.000898*x*y -0.000335*(r_u + 2*x*x);
+            y_dist = 0.000898*(r_u + 2*y*y) - 2*0.000335*x*y;
+            image_mat->mat_array[0][0] = image_mat->mat_array[0][0]*distortion_factor + x_dist;
+            image_mat->mat_array[1][0] = image_mat->mat_array[1][0]*distortion_factor + y_dist;
+
+            // move to image plane
+            mat_mul(intrinsic_mat, image_mat, image_mat);
 
             printf("%dth joint 2d point X:: %f, Y:: %f S:: %f\n", j, image_mat->mat_array[0][0], image_mat->mat_array[1][0], image_mat->mat_array[2][0]);
             */
-
             //printf("%dth joint 3d point X:: %f, Y:: %f, Z:: %f, Confidence :: %d\n", j, joint.position.xyz.x, joint.position.xyz.y, joint.position.xyz.z, joint.confidence_level);
           }
         }
@@ -104,6 +140,10 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
     if(result == K4A_STREAM_RESULT_EOF) {
       break;
     }
+    gettimeofday(&tv, NULL);
+    running = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
+    frame++;
+    printf("FPS :: %f\n", frame/((running-begin)/1000));
   }
   k4abt_tracker_shutdown(tracker);
   k4abt_tracker_destroy(tracker);
@@ -171,6 +211,8 @@ void get_2d_skeleton_joint_points_from_device (char *argv[]) {
 }
 
 int main (int argc, char *argv[]) {
+  frame = 0.0;
+
   intrinsic_mat = mat_new(3, 3);
   mat_init(intrinsic_mat, (float *)intrinsic);
   point_mat = mat_new(4, 1);
@@ -188,7 +230,9 @@ int main (int argc, char *argv[]) {
 
   mat_mul(rotate_mat, tr_mat, rotate_mat);
   mat_mul(pr_mat, rotate_mat, pr_mat);
-  mat_mul(intrinsic_mat, pr_mat, result_mat);
+  //mat_mul(intrinsic_mat, pr_mat, result_mat);
+
+  //mat_mul(pr_mat, rt_mat, pr_mat);
   for(int i = 0; i < result_mat->row; i++) {
     printf("\n");
     for(int j = 0; j < result_mat->column; j++) {
