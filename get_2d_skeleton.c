@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdlib.h>
 #include <stdio.h>
 #include <k4arecord/playback.h>
@@ -34,6 +35,9 @@ struct timeval tv;
 double begin;
 double running;
 
+FILE *json_file;
+char *base_file_name;
+
 void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
   k4a_calibration_t sensor_calibration;
   k4abt_tracker_t tracker = NULL;
@@ -62,6 +66,22 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
   begin = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
 
   while (result == K4A_STREAM_RESULT_SUCCEEDED) {
+    // make file name
+    char file_path[100] = "";
+    char frame_string[50] = "";
+    sprintf(frame_string, "%d", (int)frame);
+    strcat(file_path, base_file_name);
+    strcat(file_path, frame_string);
+    strcat(file_path, ".json");
+
+    // make file with write mode
+    json_file = fopen(file_path, "w");
+
+    // start of json
+    fprintf(json_file, "{\n");
+    fprintf(json_file, "  \"people\" :\n");
+    fprintf(json_file, "  [\n");
+
     result = k4a_playback_get_next_capture(playback_handle, &capture);
     if(result != K4A_STREAM_RESULT_EOF) {
       k4a_image_t depth_image = k4a_capture_get_depth_image(capture);
@@ -71,6 +91,9 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
         continue;
       }
       k4a_image_release(depth_image);
+      fprintf(json_file, "  ]\n");
+      fprintf(json_file, "}");
+      fclose(json_file);
     }
     if(result == K4A_STREAM_RESULT_SUCCEEDED) {
       k4a_wait_result_t queue_capture_result = k4abt_tracker_enqueue_capture(tracker, capture, K4A_WAIT_INFINITE);
@@ -82,14 +105,25 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
         size_t num_bodies = k4abt_frame_get_num_bodies(body_frame);
         printf("%zu bodies detected from file source\n", num_bodies);
         for(int i = 0; i < num_bodies; i++) {
+          fprintf(json_file, "    {\n");
+          fprintf(json_file, "      \"person_id\" : %d,\n", i);
+          fprintf(json_file, "      \"pose_keypoints_2d\" :\n");
+          fprintf(json_file, "      [\n");
           k4abt_frame_get_body_skeleton(body_frame, i, &skeleton);
           k4a_float2_t image_xy;
           int valid;
-          for(int j = 0; j < 2; j++) {
+          for(int j = 0; j < 32; j++) {
             // by sdk
             k4abt_joint_t joint = skeleton.joints[j];
             k4a_calibration_3d_to_2d (&sensor_calibration, &joint.position, K4A_CALIBRATION_TYPE_DEPTH, K4A_CALIBRATION_TYPE_COLOR, &image_xy, &valid);
-            printf("%dth body frame get %dth 2d joint point by sdk X :: %f, Y :: %f confidence :: %d\n",i, j, image_xy.xy.x, image_xy.xy.y, joint.confidence_level);
+            fprintf(json_file, "        %f,\n", image_xy.xy.x);
+            fprintf(json_file, "        %f,\n", image_xy.xy.y);
+            if(j == 31) {
+              fprintf(json_file, "        %d\n", joint.confidence_level);
+            } else {
+              fprintf(json_file, "        %d,\n", joint.confidence_level);
+            }
+            //printf("%dth body frame get %dth 2d joint point by sdk X :: %f, Y :: %f confidence :: %d\n",i, j, image_xy.xy.x, image_xy.xy.y, joint.confidence_level);
 
             /*
             // by self
@@ -130,7 +164,16 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
             */
             //printf("%dth joint 3d point X:: %f, Y:: %f, Z:: %f, Confidence :: %d\n", j, joint.position.xyz.x, joint.position.xyz.y, joint.position.xyz.z, joint.confidence_level);
           }
+          fprintf(json_file, "      ]\n");
+          if(i == num_bodies - 1) {
+            fprintf(json_file, "    }\n");
+          } else {
+            fprintf(json_file, "    },\n");
+          }
         }
+        fprintf(json_file, "  ]\n");
+        fprintf(json_file, "}");
+        fclose(json_file);
         k4abt_frame_release(body_frame);
       } else {
         printf("Failure\n");
@@ -143,7 +186,8 @@ void get_2d_skeleton_joint_points_from_mkv_file (char *argv[]) {
     gettimeofday(&tv, NULL);
     running = (tv.tv_sec) * 1000 + (tv.tv_usec) / 1000;
     frame++;
-    printf("FPS :: %f\n", frame/((running-begin)/1000));
+    // check fps
+    //printf("FPS :: %f\n", frame/((running-begin)/1000));
   }
   k4abt_tracker_shutdown(tracker);
   k4abt_tracker_destroy(tracker);
@@ -212,6 +256,7 @@ void get_2d_skeleton_joint_points_from_device (char *argv[]) {
 
 int main (int argc, char *argv[]) {
   frame = 0.0;
+  base_file_name = argv[2];
 
   intrinsic_mat = mat_new(3, 3);
   mat_init(intrinsic_mat, (float *)intrinsic);
